@@ -1,0 +1,959 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>다같이 경매</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<style>
+  body{font-family:system-ui,-apple-system,'Apple SD Gothic Neo','Malgun Gothic',sans-serif;-webkit-tap-highlight-color:transparent;overscroll-behavior:none}
+  @keyframes pop{0%{transform:scale(1)}40%{transform:scale(1.12)}100%{transform:scale(1)}}
+  .pop{animation:pop .3s ease-out}
+  @keyframes shake{0%,100%{transform:translateX(0)}25%{transform:translateX(-6px)}75%{transform:translateX(6px)}}
+  .shake{animation:shake .25s}
+  button{touch-action:manipulation}
+</style>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen">
+<div id="app"></div>
+<div id="modal" class="fixed inset-0 z-40 hidden items-end sm:items-center justify-center bg-black/70 p-3"></div>
+<div id="toast" class="fixed left-1/2 -translate-x-1/2 bottom-6 z-50 px-4 py-2 rounded-xl bg-rose-500 text-white font-bold shadow-xl transition-opacity opacity-0 pointer-events-none text-center"></div>
+
+<script>
+/* =========================================================
+ *  다같이 경매 — PeerJS(WebRTC) 기반 호스트 권한형 멀티플레이
+ *  - 메인 화면(호스트)이 게임 상태·타이머·비밀 정보를 단독으로 관리
+ *  - 플레이어는 입찰/스킬 "요청"만 보내고, 호스트가 검증 후 방송
+ *  - 비밀 정보와 보유 스킬은 각 플레이어에게만 따로 전송
+ * ========================================================= */
+const CFG = {
+  START_CREDITS: 1000, START_PRICE: 100, STEP: 50,
+  INTRO_MS: 12000, BID_MS: 5000, RESULT_MS: 7000,
+  ROUNDS: 12, BOXES: 3, MAX_PLAYERS: 4,
+  BOX_PLUS: [100, 800], BOX_MINUS: [-600, -100],   // 랜덤박스 +점수 / -점수 범위
+  PEER_PREFIX: 'dagachi-auction-v2-',
+};
+const PEER_OPTS = { debug: 1 };
+
+// 티어는 출품 구성 비율에만 내부적으로 쓰이고 화면에는 표시하지 않음
+
+// [분류, 이름, 아이콘, 설명, 최소가치, 최대가치]  — 총 44종 (분류는 화면에 안 보임)
+const ITEMS = [
+  ['S','시간여행자의 회중시계','⏱️','태엽을 감으면 1분 전으로 돌아간다는 소문이...',900,2000],
+  ['S','드래곤 비늘','🐉','용암 속에서도 녹지 않는 붉은 비늘 한 장.',800,1900],
+  ['S','전설의 몬스터 알','🥚','가끔 안에서 무언가 꿈틀거린다.',600,2000],
+  ['S','조선 백자 달항아리','🏺','보름달을 닮은 순백의 항아리.',700,1700],
+  ['S','호수의 성검','⚔️','바위에서 뽑혔다는 전설의 검.',800,1800],
+  ['S','불사조의 깃털','🪶','손에 쥐면 따뜻한 온기가 느껴진다.',650,1600],
+  ['A','스트라디바리우스 바이올린','🎻','300년 된 명기. 진품 여부는 알 수 없다.',500,1300],
+  ['A','나폴레옹의 삼각모','🎩','워털루에서 잃어버렸다는 그 모자.',400,1100],
+  ['A','달 탐사선 파편','🌕','달 먼지가 아직 묻어 있다.',450,1200],
+  ['A','해적의 보물지도','🗺️','X 표시가 세 군데나 있다.',400,1300],
+  ['A','클레오파트라의 반지','💍','에메랄드가 박힌 고대 이집트 반지.',450,1150],
+  ['A','티라노사우루스 이빨 화석','🦖','바나나만 한 크기의 이빨.',400,1000],
+  ['A','거장의 미공개 스케치','🖼️','다락방에서 발견된 낡은 스케치북.',400,1250],
+  ['B','중세 기사 갑옷','🛡️','칼자국이 그대로 남은 풀 플레이트.',250,700],
+  ['B','황금 거북이','🐢','순금으로 만든 장식품. 꽤 묵직하다.',300,650],
+  ['B','마법사의 수정구슬','🔮','들여다보면 내일 날씨가 보인다나.',200,700],
+  ['B','바이킹 뿔투구','🪖','실제 바이킹은 뿔투구를 안 썼다는데…',200,550],
+  ['B','명장의 카타나','🗡️','종이가 저절로 갈라지는 날.',300,700],
+  ['B','운석 조각','☄️','하늘에서 떨어진 쇳덩어리.',200,650],
+  ['B','연금술사의 플라스크','⚗️','바닥에 금빛 가루가 조금 남아 있다.',150,600],
+  ['B','이집트 스카라베','🪲','파라오의 무덤에서 나온 부적.',200,600],
+  ['B','대항해시대 지구본','🌍','아직 발견되지 않은 대륙이 그려져 있다.',200,550],
+  ['C','은 촛대','🕯️','오래된 저택에서 나온 은 촛대 한 쌍.',80,350],
+  ['C','황동 나침반','🧭','항상 북쪽이 아닌 어딘가를 가리킨다.',60,300],
+  ['C','골동품 타자기','⌨️','몇몇 글쇠가 빠져 있다.',80,320],
+  ['C','빈티지 필름 카메라','📷','필름이 한 장 남아 있다.',100,350],
+  ['C','도자기 찻잔 세트','🍵','이 하나가 살짝 나갔다.',50,280],
+  ['C','낡은 가죽 일기장','📔','마지막 장이 찢겨 나갔다.',40,300],
+  ['C','구리 망원경','🔭','선장실에서 쓰던 망원경.',80,320],
+  ['C','태엽 오르골','🎶','익숙한 듯 낯선 멜로디가 흐른다.',60,280],
+  ['C','축음기 레코드판','💿','라벨이 지워져 무슨 곡인지 모른다.',50,260],
+  ['F','부러진 나무젓가락','🥢','반으로 쪼개다 실패한 흔적.',0,20],
+  ['F','먼지 쌓인 돌멩이','🪨','혹시… 운석일까? 아닐 것 같다.',0,50],
+  ['F','빈 플라스틱 페트병','🧴','분리수거 하세요.',0,10],
+  ['F','녹슨 못','🔩','파상풍 주의.',0,30],
+  ['F','한 짝 잃은 양말','🧦','나머지 한 짝은 어디에…',0,40],
+  ['F','다 쓴 건전지','🔋','혀에 대보면 아주 살짝 찌릿하다.',0,20],
+  // N: 마이너스 품목 — 겉보기엔 그럴듯한 것도 섞여 있음
+  ['N','째깍거리는 상자','💣','안에서 규칙적인 소리가 난다. 시계일까?',-1000,-300],
+  ['N','저주받은 인형','🪆','눈이 마주칠 때마다 표정이 바뀐다.',-800,-200],
+  ['N','고대 왕의 성배','🍷','왕들이 마지막으로 입을 댄 잔이라고 한다.',-700,-100],
+  ['N','누군가의 차용증','📜','도장이 찍혀 있다. 채무자 칸이 비어 있다.',-900,-300],
+  ['N','유령 들린 거울','🪞','밤마다 거울 속 내가 먼저 웃는다.',-500,-50],
+  ['N','황금빛 가면','👺','쓰면 벗겨지지 않는다는 소문이 있다.',-600,-150],
+  ['X','의문의 랜덤 박스','🎁','열어보기 전엔 아무도 모른다. 점수가 오를 수도, 깎일 수도, 스킬 카드가 나올 수도, 텅 비어 있을 수도.',0,0],
+];
+
+// 스킬 — 랜덤박스 보상으로 나올 수 있음
+const SKILLS = {
+  steal: { icon: '🦹', name: '가로채기', secret: true,
+           desc: '이번 경매품을 낙찰자 대신 내가 받아요. 낙찰가는 내가 지불하고, 원래 낙찰자는 돈도 안 내고 아무것도 못 받아요. 비공개로 걸리고 결과 때 공개돼요. (크레딧이 모자라거나 봉인되면 실패하고 카드는 돌려받아요)' },
+  curse: { icon: '💀', name: '마이너스 저주', secret: true,
+           desc: '이번 품목의 실제 가치를 마이너스로 뒤집어요. 비공개로 걸리고 결과 때 공개돼요.' },
+  block: { icon: '⛓️', name: '입찰 봉인', secret: false,
+           desc: '플레이어 1명을 골라 이번 라운드에 입찰·가로채기를 못 하게 해요. 모두에게 공개돼요. (현재 최고 입찰자는 봉인 불가)' },
+};
+const SKILL_KEYS = Object.keys(SKILLS);
+const SKILL_OK = { steal: '🦹 가로채기 장전! 결과 때 공개돼요.', curse: '💀 저주를 걸었어요! 결과 때 공개돼요.', block: '⛓️ 봉인 완료!' };
+
+/* ---------------- 유틸 ---------------- */
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const ri = (a, b) => a + Math.floor(Math.random() * (b - a + 1));
+const r10 = v => Math.round(v / 10) * 10;
+const shuffle = a => { for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; };
+const fmt = n => Number(n || 0).toLocaleString('ko-KR');
+const neg = v => v === 0 ? 0 : -Math.abs(v);
+const CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+const genCode = () => Array.from({ length: 4 }, () => CODE_CHARS[Math.floor(Math.random() * CODE_CHARS.length)]).join('');
+const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
+const COLORS = ['bg-rose-500', 'bg-sky-500', 'bg-amber-500', 'bg-emerald-500'];
+const TEXTC = ['text-rose-300', 'text-sky-300', 'text-amber-300', 'text-emerald-300'];
+// 라운드마다 가치 힌트를 랜덤 공개: 없음 / 최소만 / 최대만 / 둘 다 / 중간값만
+function rollHint(it) {
+  const r = Math.random();
+  const mode = r < 0.25 ? 'none' : r < 0.5 ? (Math.random() < 0.5 ? 'min' : 'max') : r < 0.75 ? 'both' : 'mid';
+  const h = { mode };
+  if (mode === 'min' || mode === 'both') h.min = it[4];
+  if (mode === 'max' || mode === 'both') h.max = it[5];
+  if (mode === 'mid') h.mid = r10((it[4] + it[5]) / 2);
+  return h;
+}
+const pubItem = it => ({ name: it[1], icon: it[2], desc: it[3], box: it[0] === 'X', hint: it[0] === 'X' ? { mode: 'box' } : rollHint(it) });
+function hintText(it, big) {
+  const h = it.hint, b = x => `<b class="text-white">${fmt(x)}</b>`;
+  const t = { none: '<span class="text-slate-400">가치 정보 없음 🤐</span>',
+              min: `최소 ${b(h.min)}점 이상`, max: `최대 ${b(h.max)}점 이하`,
+              both: `${b(h.min)} ~ ${b(h.max)}점`, mid: `중간값 약 ${b(h.mid)}점`,
+              box: '<span class="text-pink-300">무엇이 들어 있을지 아무도 몰라요</span>' }[h.mode];
+  return t;
+}
+const HINT_LABEL = { none: '🤐 정보 없음', min: '⬇️ 최소값 공개', max: '⬆️ 최대값 공개', both: '↕️ 범위 공개', mid: '🎯 중간값 공개', box: '🎁 내용물 비공개' };
+const BOX_REWARD = { plus: '💎 보물', minus: '☠️ 저주', skill: '🃏 스킬 카드', dud: '💨 꽝' };
+const valCls = v => v < 0 ? 'text-rose-400' : 'text-yellow-300';
+const signed = v => (v > 0 ? '+' : '') + fmt(v);
+const mmss = ms => { const t = Math.max(0, Math.floor(ms / 1000)); return String(Math.floor(t / 60)).padStart(2, '0') + ':' + String(t % 60).padStart(2, '0'); };
+const PHASE_MS = { intro: CFG.INTRO_MS, bidding: CFG.BID_MS, result: CFG.RESULT_MS };
+
+const IS_PREVIEW = location.protocol === 'about:' || location.origin === 'null';
+const baseUrl = () => IS_PREVIEW ? '' : location.origin + location.pathname;
+function setUrl(u) { if (IS_PREVIEW) return; try { history.replaceState(null, '', u); } catch (e) {} }
+const mem = {};
+const store = kind => ({
+  get(k) { try { return window[kind].getItem(k); } catch (e) { return mem[kind + k] ?? null; } },
+  set(k, v) { try { window[kind].setItem(k, v); } catch (e) { mem[kind + k] = v; } },
+  del(k) { try { window[kind].removeItem(k); } catch (e) { delete mem[kind + k]; } },
+});
+const LS = store('localStorage'), SS = store('sessionStorage');
+const jparse = v => { try { return JSON.parse(v); } catch (e) { return null; } };
+
+let toastTimer;
+function toast(msg, color = 'bg-rose-500') {
+  const t = $('#toast');
+  t.className = t.className.replace(/bg-\S+/, color);
+  t.textContent = msg; t.style.opacity = 1;
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => t.style.opacity = 0, 2200);
+}
+function openModal(inner) {
+  const m = $('#modal');
+  m.innerHTML = `<div class="w-full max-w-md max-h-[85vh] overflow-y-auto rounded-3xl bg-slate-900 border border-slate-700 p-5 shadow-2xl">${inner}</div>`;
+  m.classList.remove('hidden'); m.classList.add('flex');
+}
+function closeModal() { const m = $('#modal'); m.classList.add('hidden'); m.classList.remove('flex'); m.innerHTML = ''; }
+$('#modal').addEventListener('click', e => { if (e.target.id === 'modal') closeModal(); });
+
+let role = null;   // null | 'host' | 'player' | 'solo'
+let peer = null;
+
+/* =========================================================
+ *  HOST (메인 관전 화면) — 게임 상태의 유일한 원본
+ * ========================================================= */
+const H = { G: null, conns: new Set(), status: 'connecting', restoreTries: 0 };
+
+function newGame(room) {
+  return { room, phase: 'lobby', round: 0, lineup: [], item: null, price: 0, leader: null,
+           bids: [], deadline: 0, result: null, players: {}, order: [], history: [],
+           priv: {},                              // pid → { intel, skills }  (비공개)
+           hidden: { curse: null, steal: null },  // 이번 라운드 비공개 스킬 (비공개)
+           fx: { blocked: {} },                   // 이번 라운드 공개 효과
+           events: [] };
+}
+
+function makeLineup() {
+  const by = t => ITEMS.filter(i => i[0] === t);
+  const pick = (arr, n) => shuffle([...arr]).slice(0, n);
+  const s = ri(1, 2), a = ri(1, 2), f = ri(1, 2), n = ri(1, 2), x = CFG.BOXES;
+  const rest = CFG.ROUNDS - s - a - f - n - x;
+  const box = by('X')[0];
+  const list = [...pick(by('S'), s), ...pick(by('A'), a), ...pick(by('F'), f), ...pick(by('N'), n), ...Array(x).fill(box),
+                ...pick([...by('B'), ...by('C')], rest)];
+  return shuffle(list).map(it => ({ idx: ITEMS.indexOf(it), value: it[0] === 'X' ? null : Math.min(it[5], Math.max(it[4], r10(ri(it[4], it[5])))) }));
+}
+
+// 각 플레이어에게 이번 게임에 나오는 품목 1개의 정확한 가치를 알려줌 (서로 다른 품목)
+function assignIntel() {
+  const G = H.G;
+  const cands = shuffle(G.lineup.filter(l => ITEMS[l.idx][0] !== 'X'));
+  G.priv = {};
+  G.order.forEach((id, i) => {
+    const l = cands[i % cands.length], it = ITEMS[l.idx];
+    G.priv[id] = { intel: { icon: it[2], name: it[1], value: l.value }, skills: [] };
+  });
+}
+
+function hostCreate(code, restored) {
+  role = 'host';
+  H.G = restored || newGame(code);
+  if (restored) {
+    Object.values(H.G.players).forEach(p => p.connected = false);
+    if (PHASE_MS[H.G.phase]) H.G.deadline = Date.now() + PHASE_MS[H.G.phase];
+  }
+  setUrl(baseUrl());
+  peer = new Peer(CFG.PEER_PREFIX + code, PEER_OPTS);
+  peer.on('open', () => { H.status = 'online'; H.restoreTries = 0; changed(); });
+  peer.on('connection', conn => {
+    conn.on('open', () => H.conns.add(conn));
+    conn.on('data', d => onHostData(conn, d));
+    conn.on('close', () => onHostClose(conn));
+    conn.on('error', () => onHostClose(conn));
+  });
+  peer.on('disconnected', () => { H.status = 'reconnecting'; render(); setTimeout(() => { if (peer && !peer.destroyed && peer.disconnected) peer.reconnect(); }, 1000); });
+  peer.on('error', e => {
+    if (e.type === 'unavailable-id') {
+      peer.destroy();
+      if (restored && H.restoreTries++ < 15) { H.status = 'reclaiming'; render(); setTimeout(() => hostCreate(code, H.G), 3000); }
+      else if (!restored) hostCreate(genCode());
+      else { H.status = 'error'; H.err = '이전 방 코드를 되찾지 못했어요. 새 방을 만들어 주세요.'; render(); }
+    } else if (['network', 'server-error', 'socket-error', 'socket-closed'].includes(e.type)) {
+      H.status = 'reconnecting'; render();
+    }
+  });
+  render();
+}
+
+function onHostData(conn, d) {
+  const G = H.G, now = Date.now();
+  if (!d || typeof d !== 'object') return;
+  const pl = conn._pid && G.players[conn._pid];
+  if (pl) pl.lastSeen = now;
+
+  if (d.t === 'hello') {
+    const pid = String(d.pid || '').slice(0, 40), name = String(d.name || '').trim().slice(0, 10) || '플레이어';
+    if (G.players[pid]) {
+      conn._pid = pid; Object.assign(G.players[pid], { connected: true, lastSeen: now });
+      conn.send({ t: 'welcome', pid }); changed(); return;
+    }
+    if (G.phase !== 'lobby') return conn.send({ t: 'reject', msg: '게임이 이미 진행 중이에요.' });
+    if (G.order.length >= CFG.MAX_PLAYERS) return conn.send({ t: 'reject', msg: '방이 가득 찼어요 (최대 4명).' });
+    const used = new Set(G.order.map(id => G.players[id].color));
+    const color = [0, 1, 2, 3].find(c => !used.has(c));
+    G.players[pid] = { name, credits: CFG.START_CREDITS, score: 0, won: [], connected: true, lastSeen: now, color };
+    G.order.push(pid); conn._pid = pid;
+    conn.send({ t: 'welcome', pid }); changed();
+  } else if (d.t === 'bid' && pl) {
+    const err = hostBid(conn._pid, d.price);
+    if (err) conn.send({ t: 'fail', msg: err });
+  } else if (d.t === 'skill' && pl) {
+    const err = useSkill(conn._pid, String(d.skill), String(d.target || ''));
+    conn.send(err ? { t: 'fail', msg: err } : { t: 'ok', msg: SKILL_OK[d.skill] });
+  } else if (d.t === 'skip' && pl) {
+    if (G.phase === 'intro') startBidding();
+  }
+}
+
+function onHostClose(conn) {
+  H.conns.delete(conn);
+  const pid = conn._pid; if (!pid || !H.G.players[pid]) return;
+  const stillOpen = [...H.conns].some(c => c._pid === pid && c.open);
+  if (!stillOpen) { H.G.players[pid].connected = false; changed(); }
+}
+
+function hostBid(pid, price) {
+  const G = H.G, p = G.players[pid];
+  if (G.phase !== 'bidding') return '지금은 입찰 시간이 아니에요.';
+  if (Date.now() >= G.deadline) return '아쉽게도 마감됐어요!';
+  if (G.fx.blocked[pid]) return '⛓️ 이번 라운드는 봉인돼서 입찰할 수 없어요.';
+  if (G.leader === pid) return '이미 최고 입찰자예요.';
+  const next = G.leader ? G.price + CFG.STEP : G.price;
+  if (price !== next) return '그새 가격이 올랐어요! 다시 눌러주세요.';
+  if (p.credits < next) return '크레딧이 부족해요.';
+  G.price = next; G.leader = pid;
+  G.bids.unshift({ pid, price: next }); G.bids.length = Math.min(G.bids.length, 8);
+  G.deadline = Date.now() + CFG.BID_MS;
+  changed(); return null;
+}
+
+function useSkill(pid, sk, target) {
+  const G = H.G, me = G.priv[pid], p = G.players[pid];
+  if (!me || !p) return '알 수 없는 플레이어예요.';
+  if (G.phase !== 'intro' && G.phase !== 'bidding') return '스킬은 품목 소개·입찰 중에만 쓸 수 있어요.';
+  const i = me.skills.indexOf(sk);
+  if (i < 0) return '그 스킬 카드가 없어요.';
+  if (sk === 'block') {
+    if (!G.players[target] || target === pid) return '봉인할 대상을 골라주세요.';
+    if (G.fx.blocked[target]) return '이미 봉인된 플레이어예요.';
+    if (G.phase === 'bidding' && G.leader === target) return '현재 최고 입찰자는 봉인할 수 없어요.';
+    G.fx.blocked[target] = pid;
+    G.events.push(`⛓️ ${p.name} → ${G.players[target].name} 입찰 봉인!`);
+  } else if (sk === 'curse') {
+    if (G.hidden.curse) return '이번 라운드엔 이 스킬을 쓸 수 없어요.';
+    G.hidden.curse = pid;
+  } else if (sk === 'steal') {
+    if (G.fx.blocked[pid]) return '봉인 상태에선 가로챌 수 없어요.';
+    if (G.hidden.steal) return '이번 라운드엔 이 스킬을 쓸 수 없어요.';
+    G.hidden.steal = pid;
+  } else return '알 수 없는 스킬이에요.';
+  me.skills.splice(i, 1);
+  changed(); return null;
+}
+
+function startGame() {
+  const G = H.G;
+  G.lineup = makeLineup(); G.round = 0; G.history = []; G.startedAt = Date.now(); G.endedAt = null;
+  G.order.forEach(id => Object.assign(G.players[id], { credits: CFG.START_CREDITS, score: 0, won: [] }));
+  assignIntel();
+  nextRound();
+}
+function nextRound() {
+  const G = H.G;
+  G.round++;
+  if (G.round > CFG.ROUNDS) { G.phase = 'final'; G.item = null; G.round = CFG.ROUNDS; G.endedAt = Date.now(); changed(); return; }
+  G.item = pubItem(ITEMS[G.lineup[G.round - 1].idx]);
+  Object.assign(G, { phase: 'intro', deadline: Date.now() + CFG.INTRO_MS, price: CFG.START_PRICE, leader: null, bids: [], result: null,
+                     hidden: { curse: null, steal: null }, fx: { blocked: {} }, events: [] });
+  if (role === 'solo') soloNewRound();
+  changed();
+}
+function startBidding() {
+  Object.assign(H.G, { phase: 'bidding', deadline: Date.now() + CFG.BID_MS });
+  SOLO.nextAt = {};
+  changed();
+}
+function endBidding() {
+  const G = H.G, L = G.lineup[G.round - 1], it = G.item, D = ITEMS[L.idx], isBox = D[0] === 'X';
+  const st = G.hidden.steal, refundSteal = () => G.priv[st] && G.priv[st].skills.push('steal');
+  const res = { winner: G.leader, receiver: null, price: G.price, value: null,
+                cursedBy: G.hidden.curse, stolenBy: null, stealFail: null, boxReward: null };
+  if (G.leader) {
+    let value = L.value;
+    if (isBox) {                                   // 랜덤박스: 낙찰 순간 보상 결정
+      res.boxReward = ['plus', 'minus', 'skill', 'dud'][ri(0, 3)];
+      value = res.boxReward === 'plus' ? r10(ri(...CFG.BOX_PLUS)) : res.boxReward === 'minus' ? r10(ri(...CFG.BOX_MINUS)) : 0;
+    }
+    if (res.cursedBy) value = neg(value);
+    let rc = G.leader;
+    if (st && st !== G.leader) {
+      if (G.fx.blocked[st]) { refundSteal(); res.stealFail = '봉인됨'; }
+      else if (G.players[st].credits < G.price) { refundSteal(); res.stealFail = '크레딧 부족'; }
+      else { rc = st; res.stolenBy = st; }
+    } else if (st) refundSteal();          // 내가 낙찰자면 카드 반환
+    const p = G.players[rc];
+    p.credits -= G.price; p.score += value;
+    p.won.push({ icon: it.icon, name: it.name, price: G.price, value });
+    if (res.boxReward === 'skill') G.priv[rc].skills.push(SKILL_KEYS[ri(0, SKILL_KEYS.length - 1)]);
+    res.receiver = rc; res.value = value;
+  } else {
+    if (st) refundSteal();
+    res.price = 0;
+    res.value = L.value == null ? null : (res.cursedBy ? neg(L.value) : L.value);
+  }
+  G.result = res;
+  G.history.push({ round: G.round, icon: it.icon, name: it.name, receiver: res.receiver, price: res.price, value: res.value,
+                   cursed: !!res.cursedBy, stolen: !!res.stolenBy });
+  Object.assign(G, { phase: 'result', deadline: Date.now() + CFG.RESULT_MS });
+  changed();
+}
+function backToLobby() {
+  const G = H.G;
+  G.order = G.order.filter(id => G.players[id].connected);
+  Object.keys(G.players).forEach(id => { if (!G.order.includes(id)) delete G.players[id]; });
+  Object.assign(G, { phase: 'lobby', round: 0, item: null, result: null, history: [], leader: null, bids: [], priv: {}, startedAt: null, endedAt: null,
+                     hidden: { curse: null, steal: null }, fx: { blocked: {} }, events: [] });
+  G.order.forEach(id => Object.assign(G.players[id], { credits: CFG.START_CREDITS, score: 0, won: [] }));
+  changed();
+}
+
+function pubState() {
+  const G = H.G;
+  const { lineup, deadline, priv, hidden, ...rest } = G;
+  const players = {};
+  for (const id in G.players) {
+    const { lastSeen, ...p } = G.players[id];
+    players[id] = { ...p, skillCount: (priv[id] && priv[id].skills.length) || 0 };
+  }
+  const elapsed = G.startedAt ? (G.endedAt || Date.now()) - G.startedAt : 0;
+  return { ...rest, players, remaining: Math.max(0, deadline - Date.now()), duration: PHASE_MS[G.phase] || 0, elapsed, running: !!(G.startedAt && !G.endedAt) };
+}
+function broadcast() {
+  if (role !== 'host') return;
+  const s = pubState();
+  for (const c of H.conns) { if (c.open) { try { c.send({ t: 'state', s, me: H.G.priv[c._pid] || null }); } catch (e) {} } }
+}
+function changed() {
+  if (role === 'host') LS.set('dagachi-host', JSON.stringify({ savedAt: Date.now(), G: H.G }));
+  broadcast(); render();
+}
+function hostTick() {
+  if ((role !== 'host' && role !== 'solo') || !H.G) return;
+  const G = H.G, now = Date.now();
+  if (role === 'solo') soloBotTick(now);
+  if (PHASE_MS[G.phase] && now >= G.deadline) {
+    if (G.phase === 'intro') startBidding();
+    else if (G.phase === 'bidding') endBidding();
+    else if (G.phase === 'result') nextRound();
+  }
+  if (role === 'solo') return;
+  let dirty = false;
+  for (const id of G.order) { const p = G.players[id]; if (p.connected && now - (p.lastSeen || 0) > 6000) { p.connected = false; dirty = true; } }
+  if (dirty) changed();
+}
+setInterval(hostTick, 100);
+setInterval(broadcast, 1000);
+
+/* =========================================================
+ *  SOLO (혼자 테스트) — 네트워크 없이 나 + 봇 3명
+ * ========================================================= */
+const BOTS = [
+  { name: '🤖 철수', mult: 1.15, react: [500, 2500] },   // 공격형
+  { name: '🤖 영희', mult: 1.0,  react: [800, 3200] },   // 보통
+  { name: '🤖 민수', mult: 0.85, react: [1200, 4200] },  // 신중형
+];
+const SOLO = { val: {}, nextAt: {}, plan: {} };
+
+function soloStart() {
+  role = 'solo';
+  H.G = newGame('SOLO');
+  const now = Date.now();
+  H.G.players.me = { name: '나', credits: CFG.START_CREDITS, score: 0, won: [], connected: true, lastSeen: now, color: 0 };
+  H.G.order.push('me');
+  BOTS.forEach((b, i) => {
+    H.G.players['bot' + i] = { name: b.name, credits: CFG.START_CREDITS, score: 0, won: [], connected: true, lastSeen: now, color: i + 1 };
+    H.G.order.push('bot' + i);
+  });
+  C.pid = 'me'; C.status = 'online';
+  startGame();
+}
+
+function soloNewRound() {
+  const G = H.G, it = G.item, now = Date.now();
+  SOLO.nextAt = {}; SOLO.plan = {};
+  BOTS.forEach((b, i) => {
+    const id = 'bot' + i, pv = G.priv[id];
+    const h = it.hint;                                                  // 공개된 힌트만 보고 추측
+    const [lo, hi] = h.mode === 'both' ? [h.min, h.max] : h.mode === 'min' ? [h.min, h.min + 700]
+      : h.mode === 'max' ? [h.max > 0 ? h.max * 0.35 : h.max - 700, h.max] : h.mode === 'mid' ? [h.mid - Math.abs(h.mid) * 0.4, h.mid + Math.abs(h.mid) * 0.4]
+      : h.mode === 'box' ? [0, 450] : [-200, 700];
+    let v = lo + (hi - lo) * (0.3 + Math.random() * 0.4);
+    if (pv.intel.name === it.name) v = pv.intel.value - CFG.STEP;        // 비밀 정보로 정확히 아는 품목
+    SOLO.val[id] = Math.floor(v * (pv.intel.name === it.name ? 1 : b.mult) / CFG.STEP) * CFG.STEP;
+    // 스킬 사용 계획
+    const sk = pv.skills;
+    if (!sk.length || Math.random() < 0.4) return;
+    const big = SOLO.val[id] >= 600 || (pv.intel.name === it.name && pv.intel.value >= 600);
+    let plan = null;
+    if (sk.includes('steal') && big) plan = { sk: 'steal' };
+    else if (sk.includes('curse') && (big || it.box)) plan = { sk: 'curse' };
+    else if (sk.includes('block')) {
+      const others = G.order.filter(x => x !== id).sort((a, c) => G.players[c].score - G.players[a].score);
+      plan = { sk: 'block', target: Math.random() < 0.6 ? others[0] : others[ri(0, others.length - 1)] };
+    }
+    if (plan) SOLO.plan[id] = { ...plan, at: now + ri(1500, 10000) };
+  });
+}
+
+function soloBotTick(now) {
+  const G = H.G;
+  if (G.phase !== 'intro' && G.phase !== 'bidding') return;
+  BOTS.forEach((b, i) => {
+    const id = 'bot' + i, pl = SOLO.plan[id];
+    if (pl && now >= pl.at) {
+      delete SOLO.plan[id];
+      if (!useSkill(id, pl.sk, pl.target) && pl.sk !== 'block') SOLO.val[id] = 0;  // 가로채기/저주를 건 봇은 입찰 안 함
+    }
+    if (G.phase !== 'bidding' || G.leader === id) return;
+    if (!SOLO.nextAt[id]) SOLO.nextAt[id] = now + ri(...b.react);
+    if (now < SOLO.nextAt[id]) return;
+    SOLO.nextAt[id] = now + ri(...b.react);
+    const next = G.leader ? G.price + CFG.STEP : G.price;
+    if (!G.fx.blocked[id] && next <= SOLO.val[id] && G.players[id].credits >= next && Math.random() < 0.85) {
+      hostBid(id, next);
+      BOTS.forEach((_, j) => { if (j !== i) SOLO.nextAt['bot' + j] = now + ri(...BOTS[j].react); });
+    }
+  });
+}
+
+/* =========================================================
+ *  PLAYER (개인 화면)
+ * ========================================================= */
+const C = { room: '', pid: '', name: '', conn: null, S: null, me: null, recvAt: 0, lastMsg: 0, attemptAt: 0, status: 'connecting', rejectMsg: '' };
+
+function clientJoin(room, name) {
+  role = 'player';
+  const saved = jparse(SS.get('dagachi-player'));
+  C.room = room; C.name = name;
+  C.pid = (saved && saved.room === room && saved.pid) || uid();
+  SS.set('dagachi-player', JSON.stringify({ room, pid: C.pid, name }));
+  setUrl(baseUrl() + '?room=' + room);
+  peer = new Peer(PEER_OPTS);
+  peer.on('open', connectToHost);
+  peer.on('disconnected', () => setTimeout(() => { if (!peer.destroyed && peer.disconnected) peer.reconnect(); }, 800));
+  peer.on('error', e => {
+    if (e.type === 'peer-unavailable') { C.status = 'nohost'; render(); }
+    else if (['network', 'server-error', 'socket-error', 'socket-closed'].includes(e.type)) { C.status = 'reconnecting'; render(); }
+  });
+  setInterval(clientWatchdog, 1000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) clientWatchdog(true); });
+  render();
+}
+
+function connectToHost() {
+  if (!peer || peer.destroyed || !peer.open || C.status === 'rejected') return;
+  const conn = peer.connect(CFG.PEER_PREFIX + C.room, { reliable: true });
+  const old = C.conn; C.conn = conn; C.attemptAt = Date.now();
+  if (old) { try { old.close(); } catch (e) {} }
+  conn.on('open', () => { conn.send({ t: 'hello', pid: C.pid, name: C.name }); C.lastMsg = Date.now(); });
+  conn.on('data', onClientData);
+  conn.on('close', () => { if (C.conn === conn && C.status === 'online') { C.status = 'reconnecting'; render(); } });
+}
+
+function clientWatchdog(force) {
+  if (role !== 'player' || C.status === 'rejected') return;
+  if (peer.disconnected && !peer.destroyed) { peer.reconnect(); return; }
+  if (!peer.open) return;
+  const now = Date.now();
+  const alive = C.conn && C.conn.open && now - C.lastMsg < 4500;
+  if (alive && !force) { try { C.conn.send({ t: 'ping' }); } catch (e) {} return; }
+  if (C.status === 'online' && !alive) { C.status = 'reconnecting'; render(); }
+  if (force || now - C.attemptAt > 3000) connectToHost();
+}
+
+function onClientData(d) {
+  C.lastMsg = Date.now();
+  if (d.t === 'state') {
+    const prev = C.S;
+    C.S = d.s; C.me = d.me; C.recvAt = performance.now();
+    if (C.status !== 'online') C.status = 'online';
+    if (prev && prev.leader === C.pid && d.s.leader && d.s.leader !== C.pid && d.s.phase === 'bidding') {
+      navigator.vibrate && navigator.vibrate(120); toast('추월당했어요! 😱', 'bg-amber-500');
+    }
+    if (prev && d.s.fx && d.s.fx.blocked[C.pid] && !(prev.fx && prev.fx.blocked[C.pid])) {
+      navigator.vibrate && navigator.vibrate([80, 60, 80]); toast('⛓️ 이번 라운드 입찰이 봉인됐어요!');
+    }
+    render();
+  } else if (d.t === 'welcome') {
+    C.status = 'online'; render();
+  } else if (d.t === 'reject') {
+    C.status = 'rejected'; C.rejectMsg = d.msg; SS.del('dagachi-player'); render();
+  } else if (d.t === 'fail') {
+    toast(d.msg); const b = $('[data-down="bid"]'); if (b) { b.classList.remove('shake'); void b.offsetWidth; b.classList.add('shake'); }
+  } else if (d.t === 'ok') {
+    toast(d.msg, 'bg-emerald-500');
+  }
+}
+
+/* =========================================================
+ *  렌더링
+ * ========================================================= */
+let lastHtml = '';
+function render() {
+  let html;
+  if (!role) html = viewLanding();
+  else if (role === 'host') html = viewHost(pubState());
+  else if (role === 'solo') { C.S = pubState(); C.me = H.G.priv.me || null; C.recvAt = performance.now(); html = viewPlayer(); }
+  else html = viewPlayer();
+  if (html !== lastHtml) { $('#app').innerHTML = html; lastHtml = html; }
+}
+
+function timerLoop() {
+  let rem = 0, dur = 0;
+  if ((role === 'host' || role === 'solo') && H.G) { rem = Math.max(0, H.G.deadline - Date.now()); dur = PHASE_MS[H.G.phase] || 0; }
+  else if (role === 'player' && C.S) { rem = Math.max(0, C.S.remaining - (performance.now() - C.recvAt)); dur = C.S.duration; }
+  document.querySelectorAll('[data-time]').forEach(el => el.textContent = (rem / 1000).toFixed(1));
+  let el2 = 0;   // 전체 플레이 시간
+  if ((role === 'host' || role === 'solo') && H.G && H.G.startedAt) el2 = (H.G.endedAt || Date.now()) - H.G.startedAt;
+  else if (role === 'player' && C.S) el2 = C.S.elapsed + (C.S.running ? performance.now() - C.recvAt : 0);
+  document.querySelectorAll('[data-elapsed]').forEach(el => el.textContent = mmss(el2));
+  document.querySelectorAll('[data-bar]').forEach(el => {
+    el.style.width = (dur ? Math.min(100, rem / dur * 100) : 0) + '%';
+    el.classList.toggle('bg-rose-500', rem < 2000); el.classList.toggle('bg-white', rem >= 2000);
+  });
+  requestAnimationFrame(timerLoop);
+}
+requestAnimationFrame(timerLoop);
+
+const timerBar = (label) => `
+  <div class="w-full">
+    <div class="flex justify-between text-sm text-slate-400 mb-1"><span>${label}</span><span class="font-mono text-white text-lg"><span data-time>0.0</span>s</span></div>
+    <div class="h-3 rounded-full bg-slate-800 overflow-hidden"><div data-bar class="h-full bg-white rounded-full" style="width:100%"></div></div>
+  </div>`;
+
+function itemCard(it, big) {
+  const grad = it.box ? 'from-pink-400 via-rose-500 to-indigo-600' : 'from-amber-300 via-orange-400 to-pink-500';
+  return `
+  <div class="rounded-3xl p-[3px] bg-gradient-to-br ${grad} shadow-2xl">
+    <div class="rounded-[22px] bg-slate-900/95 ${big ? 'p-8' : 'p-5'} text-center">
+      <span class="inline-block px-3 py-1 rounded-full text-xs font-black bg-slate-800 text-slate-200">${HINT_LABEL[it.hint.mode]}</span>
+      <div class="${big ? 'text-8xl my-5' : 'text-6xl my-3'}">${it.icon}</div>
+      <div class="${big ? 'text-4xl' : 'text-2xl'} font-black">${esc(it.name)}</div>
+      <div class="text-slate-400 mt-2 ${big ? 'text-lg' : 'text-sm'}">${esc(it.desc)}</div>
+      <div class="mt-4 inline-block px-4 py-2 rounded-xl bg-slate-800 ${big ? 'text-xl' : 'text-base'}">${hintText(it)}</div>
+    </div>
+  </div>`;
+}
+
+function dot(on) { return `<span class="inline-block w-2.5 h-2.5 rounded-full ${on ? 'bg-emerald-400' : 'bg-slate-600'}"></span>`; }
+const pname = (s, id) => esc((s.players[id] || {}).name || '?');
+
+function scoreboard(s, me, compact) {
+  return `<div class="grid ${compact ? 'grid-cols-2 gap-2' : 'grid-cols-1 gap-3'}">${s.order.map(id => {
+    const p = s.players[id], lead = s.leader === id && s.phase === 'bidding', blk = s.fx && s.fx.blocked[id];
+    return `<div class="rounded-2xl p-3 bg-slate-900 border ${lead ? 'border-yellow-400' : id === me ? 'border-white/40' : 'border-slate-800'} ${blk ? 'opacity-60' : ''}">
+      <div class="flex items-center gap-1.5 font-bold ${compact ? 'text-sm' : ''}">
+        <span class="w-3 h-3 shrink-0 rounded-full ${COLORS[p.color]}"></span><span class="truncate">${esc(p.name)}${id === me ? ' (나)' : ''}</span>${lead ? '👑' : ''}${blk ? '⛓️' : ''}
+        <span class="ml-auto flex items-center gap-1">${p.skillCount ? `<span class="text-xs px-1.5 rounded bg-indigo-500/30 text-indigo-200">🃏${p.skillCount}</span>` : ''}${dot(p.connected)}</span>
+      </div>
+      <div class="flex justify-between mt-1 ${compact ? 'text-xs' : 'text-sm'} text-slate-400">
+        <span>💰 <b class="text-white">${fmt(p.credits)}</b> Cr</span><span>⭐ <b class="${valCls(p.score)}">${fmt(p.score)}</b> 점</span>
+      </div></div>`;
+  }).join('')}</div>`;
+}
+
+function eventList(s) {
+  return s.events && s.events.length ? `<div class="mt-3 space-y-1">${s.events.map(e => `<div class="text-sm rounded-lg bg-indigo-500/15 text-indigo-200 px-3 py-1.5">${esc(e)}</div>`).join('')}</div>` : '';
+}
+
+function resultCard(s, me) {
+  const r = s.result, it = s.item;
+  const notes = [];
+  if (r.cursedBy) notes.push(`<div class="rounded-xl bg-rose-500/15 text-rose-300 px-3 py-2 font-bold">💀 ${pname(s, r.cursedBy)}의 저주! 가치가 마이너스로 뒤집혔다</div>`);
+  if (r.stolenBy) notes.push(`<div class="rounded-xl bg-violet-500/15 text-violet-300 px-3 py-2 font-bold">🦹 ${pname(s, r.stolenBy)}이(가) ${pname(s, r.winner)}의 낙찰품을 가로챘다!</div>`);
+  if (r.stealFail) notes.push(`<div class="rounded-xl bg-slate-800 text-slate-300 px-3 py-2">🦹 누군가의 가로채기가 실패했다 (${esc(r.stealFail)})</div>`);
+  if (r.boxReward) notes.unshift(`<div class="rounded-xl bg-pink-500/15 text-pink-300 px-3 py-2 font-bold text-base">🎁 박스를 열었더니… ${BOX_REWARD[r.boxReward]}! ${
+    r.boxReward === 'skill' ? (r.receiver === me ? '(내 스킬함 확인)' : '(무슨 카드인지는 비공개)') : r.boxReward === 'dud' ? '텅 비어 있다' : ''}</div>`);
+  const noteHtml = notes.length ? `<div class="mt-4 space-y-2 text-sm">${notes.join('')}</div>` : '';
+
+  if (!r.receiver) return `<div class="rounded-3xl bg-slate-900 p-6 text-center">
+      <div class="text-5xl">${it.icon}</div><div class="text-2xl font-black mt-2">유찰!</div>
+      <div class="text-slate-400 mt-1">아무도 입찰하지 않았어요.</div>
+      <div class="mt-3 text-lg">실제 가치: <b class="${r.value == null ? '' : valCls(r.value)}">${r.value == null ? '??? (영원한 비밀)' : signed(r.value) + ' 점'}</b></div>${noteHtml}</div>`;
+  const p = s.players[r.receiver], gain = r.value - r.price, good = gain >= 0;
+  return `<div class="rounded-3xl bg-slate-900 p-6 text-center pop border ${good ? 'border-emerald-500' : 'border-rose-500'}">
+    <div class="text-5xl">${it.icon}</div>
+    <div class="text-lg text-slate-400 mt-2">${esc(it.name)} ${r.stolenBy ? '획득!' : '낙찰!'}</div>
+    <div class="text-3xl font-black mt-1 ${TEXTC[p.color]}">${esc(p.name)}${r.receiver === me ? ' (나)' : ''}</div>
+    <div class="grid grid-cols-2 gap-3 mt-4">
+      <div class="rounded-xl bg-slate-800 p-3"><div class="text-xs text-slate-400">지불한 가격</div><div class="text-2xl font-black">${fmt(r.price)} Cr</div></div>
+      <div class="rounded-xl bg-slate-800 p-3"><div class="text-xs text-slate-400">${r.boxReward ? '박스 보상' : '실제 가치'}</div><div class="text-2xl font-black ${valCls(r.value)}">${signed(r.value)} 점</div></div>
+    </div>
+    <div class="mt-3 text-xl font-black ${good ? 'text-emerald-400' : 'text-rose-400'}">${good ? '🎉 이득' : '💸 손해'} ${signed(gain)}</div>
+    ${noteHtml}
+  </div>`;
+}
+
+function finalView(s, me) {
+  const rank = [...s.order].sort((a, b) => s.players[b].score - s.players[a].score || s.players[b].credits - s.players[a].credits);
+  const medal = ['🥇', '🥈', '🥉', '4️⃣'];
+  return `<div class="text-center"><div class="text-5xl">🏆</div><h2 class="text-3xl font-black mt-2">최종 결과</h2>
+    <div class="text-sm text-slate-400">동점이면 남은 크레딧이 많은 사람이 승리</div>
+    <div class="mt-2 inline-block px-3 py-1 rounded-full bg-slate-800 text-sm">⏱️ 총 플레이 시간 <b>${mmss(s.elapsed)}</b></div></div>
+    <div class="space-y-3 mt-6">${rank.map((id, i) => { const p = s.players[id]; return `
+      <div class="rounded-2xl p-4 bg-slate-900 border ${i === 0 ? 'border-yellow-400' : 'border-slate-800'}">
+        <div class="flex items-center gap-3"><span class="text-3xl">${medal[i]}</span>
+          <span class="font-black text-xl ${TEXTC[p.color]}">${esc(p.name)}${id === me ? ' (나)' : ''}</span>
+          <span class="ml-auto text-right"><div class="text-2xl font-black ${valCls(p.score)}">${fmt(p.score)}점</div><div class="text-xs text-slate-400">남은 ${fmt(p.credits)} Cr</div></span></div>
+        <div class="mt-2 text-sm text-slate-400 flex flex-wrap gap-x-2">${p.won.length ? p.won.map(w => `<span>${w.icon}<span class="${valCls(w.value)}">${signed(w.value)}</span></span>`).join('') : '낙찰 없음'}</div>
+      </div>`; }).join('')}</div>`;
+}
+
+// 📖 품목 도감 — 이름·설명만, 가치는 비공개
+function catalogHtml() {
+  const list = [...ITEMS].sort((a, b) => a[1].localeCompare(b[1], 'ko'));
+  return `<div class="flex items-center"><div class="text-xl font-black">📖 품목 도감 <span class="text-sm text-slate-400 font-normal">${ITEMS.length}종</span></div>
+      <button data-act="close-modal" class="ml-auto w-9 h-9 rounded-full bg-slate-800 text-lg">✕</button></div>
+    <p class="text-xs text-slate-400 mt-1">이번 게임에는 이 중 ${CFG.ROUNDS}개가 나와요 (🎁 랜덤박스는 반드시 ${CFG.BOXES}번). 가치는 비공개! 라운드마다 힌트가 랜덤으로 공개돼요.</p>
+    <div class="mt-3 space-y-1.5">${list.map(i => `
+      <div class="flex gap-3 items-start rounded-xl bg-slate-800/60 px-3 py-2"><span class="text-2xl leading-none">${i[2]}</span>
+        <div class="min-w-0"><div class="font-bold text-sm">${esc(i[1])}</div><div class="text-xs text-slate-400">${esc(i[3])}</div></div></div>`).join('')}</div>
+    <div class="mt-5 text-lg font-black">🔎 가치 힌트 <span class="text-sm text-slate-400 font-normal">매 라운드 랜덤</span></div>
+    <div class="mt-2 grid grid-cols-2 gap-1.5 text-xs">${Object.entries(HINT_LABEL).filter(([k]) => k !== 'box').map(([, l]) => l).map(l => `<div class="rounded-lg bg-slate-800/60 px-2 py-1.5">${l}</div>`).join('')}</div>
+    <div class="mt-5 text-lg font-black">🎁 랜덤박스 보상 <span class="text-sm text-slate-400 font-normal">넷 중 하나</span></div>
+    <div class="mt-2 grid grid-cols-2 gap-1.5 text-xs">${['💎 + 점수', '☠️ − 점수', '🃏 스킬 카드', '💨 꽝'].map(l => `<div class="rounded-lg bg-pink-500/10 px-2 py-1.5">${l}</div>`).join('')}</div>
+    <div class="mt-5 text-lg font-black">🃏 스킬 카드 <span class="text-sm text-slate-400 font-normal">랜덤박스에서 나올 수 있어요</span></div>
+    <div class="mt-2 space-y-1.5">${SKILL_KEYS.map(k => `<div class="rounded-xl bg-indigo-500/10 px-3 py-2"><div class="font-bold text-sm">${SKILLS[k].icon} ${SKILLS[k].name}</div><div class="text-xs text-slate-400">${esc(SKILLS[k].desc)}</div></div>`).join('')}</div>`;
+}
+
+function viewLanding() {
+  const q = (new URLSearchParams(location.search).get('room') || '').toUpperCase();
+  const saved = jparse(LS.get('dagachi-host'));
+  const canRestore = saved && saved.G && saved.G.priv && saved.G.phase !== 'final' && saved.G.phase !== 'lobby' && Date.now() - saved.savedAt < 3 * 3600e3;
+  return `
+  <div class="max-w-md mx-auto px-5 py-10">
+    <div class="text-center"><div class="text-6xl">🏛️</div>
+      <h1 class="text-4xl font-black mt-3 bg-gradient-to-r from-amber-300 to-pink-400 bg-clip-text text-transparent">다같이 경매</h1>
+      <p class="text-slate-400 mt-2">각자 폰으로 접속하는 4인 실시간 경매</p>
+      <button data-act="catalog" class="mt-3 px-4 py-1.5 rounded-full bg-slate-800 text-sm font-bold">📖 품목 도감 · 스킬 보기</button></div>
+
+    <div class="mt-8 rounded-3xl bg-slate-900 p-5 border border-slate-800">
+      <div class="font-bold text-lg">📱 참가하기</div>
+      <input id="in-code" maxlength="4" value="${esc(q)}" placeholder="방 코드 4자리" autocomplete="off"
+        class="mt-3 w-full rounded-xl bg-slate-800 px-4 py-3 text-2xl font-mono tracking-[0.4em] uppercase text-center outline-none focus:ring-2 ring-pink-400">
+      <input id="in-name" maxlength="10" placeholder="닉네임" autocomplete="off"
+        class="mt-2 w-full rounded-xl bg-slate-800 px-4 py-3 text-lg text-center outline-none focus:ring-2 ring-pink-400">
+      <button data-act="join" class="mt-3 w-full rounded-xl bg-pink-500 hover:bg-pink-400 active:scale-95 transition py-3 font-black text-lg">입장</button>
+    </div>
+
+    <div class="mt-4 rounded-3xl bg-slate-900 p-5 border border-slate-800">
+      <div class="font-bold text-lg">🖥️ 방 만들기 (메인 화면)</div>
+      <p class="text-sm text-slate-400 mt-1">TV·노트북처럼 다같이 보는 화면에서 여세요. 게임 진행과 타이머를 이 화면이 담당해요.</p>
+      <button data-act="host-new" class="mt-3 w-full rounded-xl bg-slate-100 text-slate-900 active:scale-95 transition py-3 font-black">새 방 만들기</button>
+      ${canRestore ? `<button data-act="host-restore" class="mt-2 w-full rounded-xl bg-amber-500 text-amber-950 active:scale-95 transition py-3 font-black">진행 중이던 방 복구 (${esc(saved.G.room)} · ${saved.G.round}라운드)</button>` : ''}
+    </div>
+
+    <div class="mt-4 rounded-3xl bg-slate-900 p-5 border border-slate-800">
+      <div class="font-bold text-lg">🤖 혼자 테스트</div>
+      <p class="text-sm text-slate-400 mt-1">네트워크 없이 이 화면에서 봇 3명(공격형·보통·신중형)과 바로 대결해요. 봇도 비밀 정보와 스킬을 써요.</p>
+      <button data-act="solo" class="mt-3 w-full rounded-xl bg-indigo-500 hover:bg-indigo-400 active:scale-95 transition py-3 font-black">봇이랑 한 판 하기</button>
+    </div>
+  </div>`;
+}
+
+function statusPill(st) {
+  const m = { online: ['bg-emerald-500/20 text-emerald-300', '연결됨'], connecting: ['bg-slate-700 text-slate-300', '연결 중…'],
+              reconnecting: ['bg-amber-500/20 text-amber-300', '재연결 중…'], reclaiming: ['bg-amber-500/20 text-amber-300', '방 코드 되찾는 중…'],
+              nohost: ['bg-rose-500/20 text-rose-300', '방을 찾는 중…'], error: ['bg-rose-500/20 text-rose-300', '오류'] }[st] || ['bg-slate-700', st];
+  return `<span class="px-2.5 py-1 rounded-full text-xs font-bold ${m[0]}">${m[1]}</span>`;
+}
+
+function viewHost(s) {
+  const url = baseUrl() + '?room=' + s.room;
+  const head = `<div class="flex items-center gap-3 flex-wrap">
+      <div class="text-2xl font-black">🏛️ 다같이 경매</div>${statusPill(H.status)}
+      <button data-act="catalog" class="px-3 py-1 rounded-full bg-slate-800 text-sm font-bold">📖 도감</button>
+      <div class="ml-auto flex items-center gap-3">
+        ${s.phase !== 'lobby' ? `<div class="rounded-xl bg-slate-800 px-3 py-1.5 font-mono text-xl">⏱️ <span data-elapsed>00:00</span></div>` : ''}
+        ${s.phase !== 'lobby' && s.phase !== 'final' ? `<div class="text-lg text-slate-400">라운드 <b class="text-white text-2xl">${s.round}</b> / ${CFG.ROUNDS}</div>` : ''}
+        <div class="rounded-xl bg-slate-800 px-3 py-1.5 font-mono text-xl tracking-widest">방 <b class="text-pink-300">${esc(s.room)}</b></div>
+      </div></div>${H.err ? `<div class="mt-3 text-rose-300">${esc(H.err)}</div>` : ''}`;
+
+  if (s.phase === 'lobby') {
+    return `<div class="max-w-5xl mx-auto p-6">${head}
+      <div class="grid md:grid-cols-2 gap-6 mt-8">
+        <div class="rounded-3xl bg-slate-900 p-6 text-center border border-slate-800">
+          <div class="text-slate-400">폰으로 QR을 찍거나 코드를 입력하세요</div>
+          ${IS_PREVIEW ? '<div class="mt-4 text-amber-300 text-sm">⚠️ 미리보기 창에서는 QR·링크가 동작하지 않아요. GitHub Pages에 올린 주소로 열어주세요.</div>'
+            : `<img src="https://api.qrserver.com/v1/create-qr-code/?size=240x240&margin=8&data=${encodeURIComponent(url)}" onerror="this.remove()" class="mx-auto mt-4 rounded-xl bg-white" width="240" height="240" alt="">`}
+          <div class="mt-4 font-mono text-6xl font-black tracking-[0.3em] text-pink-300">${esc(s.room)}</div>
+          ${IS_PREVIEW ? '' : `<div class="mt-2 text-xs text-slate-500 break-all">${esc(url)}</div>`}
+        </div>
+        <div>
+          <div class="font-bold text-lg mb-3">참가자 ${s.order.length} / ${CFG.MAX_PLAYERS}</div>
+          <div class="space-y-3">${[0, 1, 2, 3].map(i => { const id = s.order[i], p = id && s.players[id]; return p ? `
+            <div class="flex items-center gap-3 rounded-2xl bg-slate-900 p-4 border border-slate-800">
+              <span class="w-4 h-4 rounded-full ${COLORS[p.color]}"></span><b class="text-lg">${esc(p.name)}</b>
+              <span class="ml-auto">${dot(p.connected)}</span>
+              ${!p.connected ? `<button data-act="kick" data-pid="${esc(id)}" class="text-xs px-2 py-1 rounded bg-slate-700">내보내기</button>` : ''}
+            </div>` : `<div class="rounded-2xl border-2 border-dashed border-slate-800 p-4 text-slate-600">빈 자리</div>`; }).join('')}</div>
+          <button data-act="start" ${s.order.length ? '' : 'disabled'} class="mt-5 w-full rounded-2xl bg-pink-500 disabled:bg-slate-800 disabled:text-slate-600 active:scale-95 transition py-4 font-black text-xl">게임 시작 ▶</button>
+          <p class="text-xs text-slate-500 mt-3">💡 시작하면 각자 폰에 <b>이번 게임에 나오는 품목 1개의 정확한 가치</b>가 비밀로 전달돼요. 이 컴퓨터로도 플레이하려면 위 주소를 새 탭에서 열어 참가하세요.</p>
+        </div>
+      </div></div>`;
+  }
+
+  if (s.phase === 'final') {
+    return `<div class="max-w-3xl mx-auto p-6">${head}<div class="mt-8">${finalView(s, null)}</div>
+      <button data-act="again" class="mt-6 w-full rounded-2xl bg-pink-500 active:scale-95 transition py-4 font-black text-xl">같은 멤버로 다시 하기</button></div>`;
+  }
+
+  const lp = s.leader && s.players[s.leader];
+  let center;
+  if (s.phase === 'intro') {
+    center = `${itemCard(s.item, true)}<div class="mt-6">${timerBar('품목 소개 — 전략을 세우세요')}</div>${eventList(s)}
+      <button data-act="skip" class="mt-4 w-full rounded-2xl bg-slate-100 text-slate-900 active:scale-95 transition py-3 font-black">경매 즉시 시작하기 ⚡</button>`;
+  } else if (s.phase === 'bidding') {
+    center = `<div class="grid grid-cols-5 gap-4 items-center">
+        <div class="col-span-2">${itemCard(s.item, false)}</div>
+        <div class="col-span-3 text-center">
+          <div class="text-slate-400">현재 ${lp ? '최고가' : '시작가'}</div>
+          <div class="text-7xl font-black my-2">${fmt(s.price)}<span class="text-3xl text-slate-400"> Cr</span></div>
+          <div class="text-2xl">${lp ? `👑 <b class="${TEXTC[lp.color]}">${esc(lp.name)}</b>` : '<span class="text-slate-500">첫 입찰을 기다리는 중…</span>'}</div>
+          <div class="mt-6">${timerBar('남은 시간')}</div>
+          <div class="mt-4 flex flex-wrap justify-center gap-2 text-sm">${s.bids.slice(1, 6).map(b => `<span class="px-2 py-1 rounded-lg bg-slate-800 ${TEXTC[s.players[b.pid].color]}">${esc(s.players[b.pid].name)} ${fmt(b.price)}</span>`).join('')}</div>
+          ${eventList(s)}
+        </div></div>`;
+  } else {
+    center = `${resultCard(s, null)}<div class="mt-6">${timerBar(s.round >= CFG.ROUNDS ? '최종 결과까지' : '다음 라운드까지')}</div>`;
+  }
+  return `<div class="max-w-6xl mx-auto p-6">${head}
+    <div class="grid lg:grid-cols-4 gap-6 mt-6">
+      <div class="lg:col-span-3">${center}</div>
+      <div><div class="font-bold mb-3">순위표</div>${scoreboard(s, null, false)}
+        <div class="font-bold mt-6 mb-2">낙찰 기록</div>
+        <div class="space-y-1 text-sm">${s.history.slice().reverse().map(h => `<div class="flex gap-2 text-slate-400"><span>R${h.round}</span><span>${h.icon}</span>
+          <span class="truncate">${h.receiver ? pname(s, h.receiver) : '유찰'}${h.stolen ? ' 🦹' : ''}${h.cursed ? ' 💀' : ''}</span>
+          ${h.receiver ? `<span class="ml-auto ${h.value - h.price >= 0 ? 'text-emerald-400' : 'text-rose-400'}">${signed(h.value - h.price)}</span>` : ''}</div>`).join('') || '<div class="text-slate-600">아직 없음</div>'}</div>
+      </div>
+    </div></div>`;
+}
+
+function intelCard(s) {
+  const it = C.me && C.me.intel; if (!it) return '';
+  const now = s.item && s.item.name === it.name;
+  return `<div class="mt-3 rounded-2xl p-3 border ${now ? 'border-yellow-400 bg-yellow-400/10' : 'border-slate-800 bg-slate-900'}">
+    <div class="text-xs text-slate-400">🔍 나만 아는 비밀 정보 ${now ? '<b class="text-yellow-300">— 바로 지금 이 품목!</b>' : '(이번 게임에 반드시 나와요)'}</div>
+    <div class="flex items-center gap-2 mt-1"><span class="text-2xl">${it.icon}</span><b class="truncate">${esc(it.name)}</b>
+      <span class="ml-auto text-xl font-black ${valCls(it.value)} whitespace-nowrap">${signed(it.value)}점</span></div></div>`;
+}
+
+function skillBar(s) {
+  const sk = (C.me && C.me.skills) || [], usable = s.phase === 'intro' || s.phase === 'bidding';
+  return `<div class="mt-3 rounded-2xl bg-slate-900 p-3 border border-slate-800">
+    <div class="text-xs text-slate-400">🃏 내 스킬 카드 ${sk.length ? (usable ? '— 눌러서 사용' : '— 품목 소개·입찰 중에 사용 가능') : '— 🎁 랜덤박스에서 나올 수 있어요'}</div>
+    ${sk.length ? `<div class="flex flex-wrap gap-2 mt-2">${sk.map(k => `<button data-act="skill" data-skill="${k}" ${usable ? '' : 'disabled'}
+      class="px-3 py-2 rounded-xl bg-indigo-500 disabled:bg-slate-800 disabled:text-slate-500 font-bold text-sm active:scale-95 transition">${SKILLS[k].icon} ${SKILLS[k].name}</button>`).join('')}</div>` : ''}
+  </div>`;
+}
+
+function viewPlayer() {
+  const s = C.S, me = C.pid;
+  if (C.status === 'rejected') return `<div class="max-w-md mx-auto p-8 text-center"><div class="text-5xl">🚪</div>
+      <div class="text-xl font-bold mt-3">${esc(C.rejectMsg)}</div>
+      <button data-act="leave" class="mt-6 rounded-xl bg-slate-800 px-6 py-3 font-bold">처음으로</button></div>`;
+  if (!s || !s.players[me]) return `<div class="max-w-md mx-auto p-8 text-center"><div class="text-5xl animate-pulse">📡</div>
+      <div class="text-xl font-bold mt-3">방 <span class="font-mono text-pink-300">${esc(C.room)}</span>에 접속 중…</div>
+      <div class="mt-2">${statusPill(C.status)}</div>
+      ${C.status === 'nohost' ? '<p class="text-sm text-slate-400 mt-4">방 코드가 맞는지, 메인 화면이 켜져 있는지 확인해 주세요. 자동으로 계속 시도할게요.</p>' : ''}
+      <button data-act="leave" class="mt-6 rounded-xl bg-slate-800 px-6 py-3 font-bold">취소</button></div>`;
+
+  const p = s.players[me];
+  const top = `<div class="sticky top-0 z-10 bg-slate-950/90 backdrop-blur px-4 py-3 border-b border-slate-800">
+      <div class="flex items-center gap-2"><span class="w-3 h-3 rounded-full ${COLORS[p.color]}"></span><b>${esc(p.name)}</b>
+        ${s.phase !== 'lobby' && s.phase !== 'final' ? `<span class="text-xs text-slate-400">R${s.round}/${CFG.ROUNDS}</span>` : ''}
+        ${s.phase !== 'lobby' ? `<span class="text-xs font-mono text-slate-300">⏱️<span data-elapsed>00:00</span></span>` : ''}
+        <button data-act="catalog" class="px-2 py-0.5 rounded-full bg-slate-800 text-xs font-bold">📖 도감</button>
+        <span class="ml-auto">${role === 'solo' ? '<span class="px-2.5 py-1 rounded-full text-xs font-bold bg-indigo-500/20 text-indigo-300">혼자 테스트</span>' : statusPill(C.status)}</span></div>
+      <div class="flex gap-4 mt-1 text-sm"><span>💰 <b class="text-lg">${fmt(p.credits)}</b> Cr</span><span>⭐ <b class="text-lg ${valCls(p.score)}">${fmt(p.score)}</b> 점</span></div>
+    </div>`;
+
+  let body;
+  const blockedBy = s.fx && s.fx.blocked[me];
+  if (s.phase === 'lobby') {
+    body = `<div class="text-center py-10"><div class="text-5xl">⏳</div><div class="text-xl font-bold mt-3">메인 화면에서 시작하길 기다리는 중</div>
+      <div class="text-slate-400 mt-1">참가자 ${s.order.length}명</div></div>${scoreboard(s, me, true)}`;
+  } else if (s.phase === 'intro') {
+    body = `${itemCard(s.item, false)}${intelCard(s)}${skillBar(s)}${eventList(s)}<div class="mt-4">${timerBar('품목 소개')}</div>
+      <button data-act="skip" class="mt-4 w-full rounded-2xl bg-slate-100 text-slate-900 active:scale-95 transition py-4 font-black text-lg">경매 즉시 시작하기 ⚡</button>
+      <div class="mt-4">${scoreboard(s, me, true)}</div>`;
+  } else if (s.phase === 'bidding') {
+    const lp = s.leader && s.players[s.leader], mine = s.leader === me;
+    const next = s.leader ? s.price + CFG.STEP : s.price, broke = p.credits < next;
+    const label = blockedBy ? `⛓️ 봉인됨<div class="text-base font-bold mt-1">${pname(s, blockedBy)}의 스킬</div>`
+      : mine ? '👑 내가 최고 입찰자' : broke ? '크레딧 부족 😢' : `입찰 ${fmt(next)} Cr`;
+    body = `<div class="flex items-center gap-3 rounded-2xl bg-slate-900 p-3"><span class="text-4xl">${s.item.icon}</span>
+        <div class="min-w-0"><div class="font-bold truncate">${esc(s.item.name)}</div><div class="text-xs text-slate-400">${hintText(s.item)}</div></div></div>
+      <div class="text-center mt-4"><div class="text-slate-400 text-sm">현재 ${lp ? '최고가' : '시작가'}</div>
+        <div class="text-6xl font-black my-1">${fmt(s.price)}<span class="text-2xl text-slate-400"> Cr</span></div>
+        <div class="text-lg">${lp ? `👑 <b class="${TEXTC[lp.color]}">${esc(lp.name)}${mine ? ' (나)' : ''}</b>` : '<span class="text-slate-500">아직 입찰 없음</span>'}</div></div>
+      <div class="mt-3">${timerBar('남은 시간')}</div>
+      <button data-down="bid" data-price="${next}" ${mine || broke || blockedBy ? 'disabled' : ''}
+        class="mt-4 w-full h-36 rounded-3xl text-3xl font-black transition active:scale-95 select-none
+        ${blockedBy ? 'bg-slate-800 text-slate-400 border-2 border-slate-600' : mine ? 'bg-yellow-400/20 text-yellow-300 border-2 border-yellow-400' : broke ? 'bg-slate-800 text-slate-500' : 'bg-gradient-to-br from-pink-500 to-rose-600 shadow-lg shadow-rose-900/50'}">${label}</button>
+      ${intelCard(s)}${skillBar(s)}${eventList(s)}
+      <div class="mt-4">${scoreboard(s, me, true)}</div>`;
+  } else if (s.phase === 'result') {
+    body = `${resultCard(s, me)}<div class="mt-4">${timerBar('다음 라운드까지')}</div>${intelCard(s)}${skillBar(s)}<div class="mt-4">${scoreboard(s, me, true)}</div>`;
+  } else {
+    body = finalView(s, me) + (role === 'solo'
+      ? `<button data-act="solo-again" class="mt-6 w-full rounded-2xl bg-pink-500 active:scale-95 transition py-4 font-black text-lg">다시 하기</button>
+         <button data-act="leave" class="mt-2 w-full rounded-2xl bg-slate-800 py-3 font-bold">처음으로</button>`
+      : `<p class="text-center text-sm text-slate-500 mt-6">메인 화면에서 다시 시작할 수 있어요.</p>`);
+  }
+  return `${top}<div class="max-w-md mx-auto p-4 pb-10">${body}</div>`;
+}
+
+/* =========================================================
+ *  입력 처리
+ * ========================================================= */
+function sendSkill(skill, target) {
+  if (role === 'solo') {
+    const err = useSkill('me', skill, target);
+    err ? toast(err) : toast(SKILL_OK[skill], 'bg-emerald-500');
+  } else if (C.conn && C.conn.open) C.conn.send({ t: 'skill', skill, target });
+  else toast('연결이 끊겼어요. 재연결 중…', 'bg-amber-500');
+}
+
+function act(name, el) {
+  if (name === 'join') {
+    const code = ($('#in-code').value || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+    const nm = ($('#in-name').value || '').trim();
+    if (code.length !== 4) return toast('방 코드 4자리를 입력하세요');
+    if (!nm) return toast('닉네임을 입력하세요');
+    clientJoin(code, nm.slice(0, 10));
+  } else if (name === 'solo') soloStart();
+  else if (name === 'solo-again' && role === 'solo') { backToLobby(); startGame(); }
+  else if (name === 'host-new') hostCreate(genCode());
+  else if (name === 'host-restore') { const sv = jparse(LS.get('dagachi-host')); if (sv) hostCreate(sv.G.room, sv.G); }
+  else if (name === 'start' && role === 'host') startGame();
+  else if (name === 'again' && role === 'host') backToLobby();
+  else if (name === 'kick' && role === 'host') {
+    const id = el.dataset.pid, G = H.G;
+    if (G.phase === 'lobby') { G.order = G.order.filter(x => x !== id); delete G.players[id]; changed(); }
+  } else if (name === 'skip') {
+    if (role === 'host' || role === 'solo') { if (H.G.phase === 'intro') startBidding(); }
+    else if (C.conn && C.conn.open) C.conn.send({ t: 'skip' });
+  } else if (name === 'bid' && role === 'solo') {
+    const err = hostBid('me', Number(el.dataset.price));
+    if (err) { toast(err); el.classList.remove('shake'); void el.offsetWidth; el.classList.add('shake'); }
+  } else if (name === 'bid') {
+    if (C.conn && C.conn.open) C.conn.send({ t: 'bid', price: Number(el.dataset.price) });
+    else toast('연결이 끊겼어요. 재연결 중…', 'bg-amber-500');
+  } else if (name === 'catalog') {
+    openModal(catalogHtml());
+  } else if (name === 'close-modal') {
+    closeModal();
+  } else if (name === 'skill') {
+    const k = el.dataset.skill, sk = SKILLS[k], s = C.S;
+    if (k === 'block') {
+      const targets = s.order.filter(id => id !== C.pid && !s.fx.blocked[id]);
+      openModal(`<div class="text-xl font-black">${sk.icon} ${sk.name}</div><p class="text-sm text-slate-400 mt-1">${esc(sk.desc)}</p>
+        <div class="mt-4 space-y-2">${targets.map(id => `<button data-act="skill-go" data-skill="block" data-target="${esc(id)}"
+          class="w-full rounded-xl bg-slate-800 hover:bg-slate-700 px-4 py-3 font-bold text-left flex items-center gap-2"><span class="w-3 h-3 rounded-full ${COLORS[s.players[id].color]}"></span>${pname(s, id)} 봉인하기</button>`).join('') || '<div class="text-slate-500">봉인할 수 있는 대상이 없어요.</div>'}</div>
+        <button data-act="close-modal" class="mt-3 w-full rounded-xl bg-slate-700 py-2.5 font-bold">취소</button>`);
+    } else {
+      openModal(`<div class="text-xl font-black">${sk.icon} ${sk.name}</div><p class="text-sm text-slate-400 mt-2">${esc(sk.desc)}</p>
+        <div class="mt-3 text-sm">대상 품목: <b>${s.item ? s.item.icon + ' ' + esc(s.item.name) : '-'}</b></div>
+        <div class="grid grid-cols-2 gap-2 mt-4">
+          <button data-act="close-modal" class="rounded-xl bg-slate-700 py-3 font-bold">취소</button>
+          <button data-act="skill-go" data-skill="${k}" class="rounded-xl bg-indigo-500 py-3 font-black">사용하기</button></div>`);
+    }
+  } else if (name === 'skill-go') {
+    closeModal(); sendSkill(el.dataset.skill, el.dataset.target);
+  } else if (name === 'leave') {
+    SS.del('dagachi-player'); if (IS_PREVIEW) location.reload(); else location.href = baseUrl();
+  }
+}
+document.addEventListener('pointerdown', e => {
+  const b = e.target.closest('[data-down]'); if (!b || b.disabled) return;
+  e.preventDefault(); act(b.dataset.down, b);
+});
+document.addEventListener('click', e => {
+  const b = e.target.closest('[data-act]'); if (!b || b.disabled) return;
+  act(b.dataset.act, b);
+});
+document.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !role && (e.target.id === 'in-name' || e.target.id === 'in-code')) act('join');
+});
+
+/* ---------------- 시작 ---------------- */
+(function boot() {
+  const q = new URLSearchParams(location.search).get('room');
+  const saved = jparse(SS.get('dagachi-player'));
+  if (q && saved && saved.room === q.toUpperCase() && saved.name) { clientJoin(saved.room, saved.name); return; }
+  render();
+  if (q) setTimeout(() => $('#in-name') && $('#in-name').focus(), 50);
+})();
+</script>
+</body>
+</html>
